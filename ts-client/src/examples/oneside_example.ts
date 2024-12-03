@@ -237,11 +237,47 @@ async function createPool() {
   };
 }
 
+async function swap(dlmmPool: DLMM) {
+  const swapAmount = new BN(100);
+  // Swap quote
+  const swapYtoX = true;
+  const binArrays = await dlmmPool.getBinArrayForSwap(swapYtoX);
+
+  const swapQuote = await dlmmPool.swapQuote(swapAmount, swapYtoX, new BN(10), binArrays);
+
+  console.log("🚀 ~ swapQuote:", swapQuote);
+
+  // Swap
+  const swapTx = await dlmmPool.swap({
+    inToken: dlmmPool.tokenX.publicKey,
+    binArraysPubkey: swapQuote.binArraysPubkey,
+    inAmount: swapAmount,
+    lbPair: dlmmPool.pubkey,
+    user: user.publicKey,
+    minOutAmount: swapQuote.minOutAmount,
+    outToken: dlmmPool.tokenY.publicKey,
+  });
+
+  try {
+    const swapTxHash = await sendAndConfirmTransaction(connection, swapTx, [
+      user,
+    ]);
+    console.log("🚀 ~ swapTxHash:", swapTxHash);
+  } catch (error) {
+    console.log("🚀 ~ error:", JSON.parse(JSON.stringify(error)));
+  }
+}
+
 async function main() {
   const { poolAddress, tokenX, tokenY } = await createPool();
   console.log("Pool created at:", poolAddress.toString());
   console.log("Token X:", tokenX.toString());
   console.log("Token Y:", tokenY.toString());
+
+  const dlmmPool = await DLMM.create(connection, poolAddress, {
+    cluster: "devnet",
+  });
+  await swap(dlmmPool);
 }
 
 main();
