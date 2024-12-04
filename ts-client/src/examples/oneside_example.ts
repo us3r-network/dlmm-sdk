@@ -3,8 +3,9 @@ import {
   Keypair,
   PublicKey,
   sendAndConfirmTransaction,
+  Transaction,
+  SystemProgram,
 } from "@solana/web3.js";
-import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { DLMM } from "../dlmm";
 import { BinLiquidity, LbPosition, StrategyType } from "../dlmm/types";
 import { deriveLbPair2, derivePresetParameter2 } from "../dlmm/helpers";
@@ -19,7 +20,7 @@ const byteArray = [89,178,192,81,49,83,87,144,176,217,60,218,47,63,151,131,91,16
 const user = Keypair.fromSecretKey(
   new Uint8Array(byteArray)
 );
-const RPC = process.env.RPC || "https://api.devnet.solana.com";
+const RPC = process.env.RPC || "https://mainnet.helius-rpc.com/?api-key=02d1bef9-8593-4e92-859e-5c4240f27d22";
 const connection = new Connection(RPC, "finalized");
 const keypair = Keypair.fromSecretKey(
   new Uint8Array(byteArray)
@@ -56,10 +57,73 @@ async function getActiveBin(dlmmPool: DLMM) {
   console.log("🚀 ~ activeBin:", activeBin);
 }
 
+async function confirmTransaction(connection: Connection, signature: string) {
+  const latestBlockhash = await connection.getLatestBlockhash();
+  return await connection.confirmTransaction({
+    signature,
+    ...latestBlockhash
+  }, 'finalized');
+}
+
+async function sendTransactionWithRetry(connection: Connection, transaction: web3.Transaction, signers: Keypair[], maxRetries: number = 3) {
+  let retries = 0;
+  let signature;
+  while (retries < maxRetries) {
+    try {
+      signature = await sendAndConfirmTransaction(connection, transaction, signers, {
+        skipPreflight: false,
+        preflightCommitment: 'finalized',
+        commitment: 'finalized',
+      });
+      await confirmTransaction(connection, signature);
+      return signature;
+    } catch (error) {
+      console.log(`Transaction failed with error: ${error}. Retrying... (${retries + 1}/${maxRetries})`);
+      retries++;
+    }
+  }
+  throw new Error('Transaction failed after maximum retries');
+}
+
+async function sendTransactionWithPriorityFee(connection: Connection, transaction: web3.Transaction, signers: Keypair[], priorityFee: number) {
+  // Set the priority fee
+  transaction.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+  transaction.feePayer = signers[0].publicKey;
+
+  // Add priority fee to the transaction
+  transaction.add(
+    SystemProgram.transfer({
+      fromPubkey: signers[0].publicKey,
+      toPubkey: signers[0].publicKey, // Self-transfer to increase fee
+      lamports: priorityFee,
+    })
+  );
+
+  // Get the current block height and set a last valid block height
+  const currentBlockHeight = await connection.getBlockHeight();
+
+  // Sign and send the transaction
+  transaction.sign(...signers);
+
+  try {
+    const signature = await sendAndConfirmTransaction(connection, transaction, signers, {
+      skipPreflight: false,
+      preflightCommitment: 'finalized',
+      commitment: 'finalized',
+    });
+    await confirmTransaction(connection, signature);
+    return signature;
+  } catch (error) {
+    console.log(`Transaction failed with error: ${error}`);
+    throw error;
+  }
+}
+
 async function createPool() {
+  console.log("🚀 ~ creating");
   // 1. 创建两个代币 mint
-  const tokenXDecimals = 6;
-  const tokenYDecimals = 6;
+  const tokenXDecimals = 9;
+  const tokenYDecimals = 9;
   const tokenX = await createMint(
     connection,
     keypair,
@@ -70,16 +134,9 @@ async function createPool() {
     null,
     TOKEN_PROGRAM_ID
   );
-  const tokenY = await createMint(
-    connection,
-    keypair,
-    keypair.publicKey,
-    null,
-    tokenYDecimals,
-    Keypair.generate(),
-    null,
-    TOKEN_PROGRAM_ID
-  );
+  const tokenY = new PublicKey("So11111111111111111111111111111111111111112"); // Mainnet SOL
+  console.log("🚀 ~ tokenX:", tokenX.toString());
+  console.log("🚀 ~ tokenY:", tokenY.toString());
 
   // 2. 为用户创建代币账户并铸造代币
   const userTokenX = await getOrCreateAssociatedTokenAccount(
@@ -103,21 +160,22 @@ async function createPool() {
     keypair.publicKey,
     1000000 * 10 ** tokenXDecimals
   );
-  await mintTo(
-    connection,
-    keypair,
-    tokenY,
-    userTokenY.address,
-    keypair.publicKey,
-    1000000 * 10 ** tokenYDecimals
-  );
+  // await mintTo(
+  //   connection,
+  //   keypair,
+  //   tokenY,
+  //   userTokenY.address,
+  //   keypair.publicKey,
+  //   1000000 * 10 ** tokenYDecimals
+  // );
 
+  console.log("🚀 ~ userTokenX:", userTokenX.address.toString());
+  console.log("🚀 ~ userTokenY:", userTokenY.address.toString());
   // 3. 计算 pool address
   const feeBps = new BN(10); // 0.1%的费用
   const binStep = new BN(100); // 1%的步长
   const baseFactor = computeBaseFactorFromFeeBps(binStep, feeBps);
-  const programId = new web3.PublicKey(LBCLMM_PROGRAM_IDS["devnet"]);
-
+  const programId = new web3.PublicKey(LBCLMM_PROGRAM_IDS["mainnet-beta"]);
 
   // 4.初始化 preset parameter pda
   const [presetParamPda] = derivePresetParameter2(
@@ -136,7 +194,7 @@ async function createPool() {
     );
     const program = new Program(
       IDL,
-      LBCLMM_PROGRAM_IDS["devnet"],
+      LBCLMM_PROGRAM_IDS["mainnet-beta"],
       provider
     );
     
@@ -163,6 +221,7 @@ async function createPool() {
       commitment: "confirmed",
     });
   }
+  console.log("🚀 ~ presetParamPda:", presetParamPda.toString());
 
   // 5. 创建 lb pair pda
   const DEFAULT_ACTIVE_ID = new BN(0);
@@ -175,11 +234,9 @@ async function createPool() {
     baseFactor,
     presetParamPda,
     DEFAULT_ACTIVE_ID,
-    { cluster: "devnet" }
+    { cluster: "mainnet-beta" }
   );
-  await sendAndConfirmTransaction(connection, rawTx, [
-    keypair,
-  ]);
+  const signature = await sendTransactionWithRetry(connection, rawTx, [keypair]);
   console.log("🚀 ~ rawTx:", rawTx);
   const [lbPairPubkey] = deriveLbPair2(
     tokenX,
@@ -192,7 +249,7 @@ async function createPool() {
 
   // 6. 创建 DLMM 实例
   const dlmmPool = await DLMM.create(connection, lbPairPubkey, {
-    cluster: "devnet",
+    cluster: "mainnet-beta",
   });
 
   // 7. 初始化池子，设置初始价格为 2
@@ -208,9 +265,9 @@ async function createPool() {
   const totalYAmount = new BN(0);
 
   const newPosition = new Keypair();
-  console.log("minBinId:", minBinId, "maxBinId:", maxBinId, "totalXAmount:", totalXAmount.toString(), "totalYAmount:", totalYAmount.toString());
+  console.log("🚀 ~ minBinId:", minBinId, "maxBinId:", maxBinId, "totalXAmount:", totalXAmount.toString(), "totalYAmount:", totalYAmount.toString());
 
-  const createPositionTx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
+  let createPositionTx = await dlmmPool.initializePositionAndAddLiquidityByStrategy({
     positionPubKey: newPosition.publicKey,
     user: keypair.publicKey,
     totalXAmount,
@@ -222,12 +279,19 @@ async function createPool() {
       singleSidedX: true,
     },
   });
+  const blockhashResponse = await connection.getLatestBlockhash();
+  const lastValidBlockHeight = blockhashResponse.lastValidBlockHeight - 150;
 
-  const txHash = await sendAndConfirmTransaction(
-    connection,
-    createPositionTx,
-    [keypair, newPosition]
-  );
+  createPositionTx = new Transaction({
+    feePayer: keypair.publicKey,
+    blockhash: blockhashResponse.blockhash,
+    lastValidBlockHeight: lastValidBlockHeight,
+  }).add(createPositionTx);
+
+  console.log("🚀 ~ createPositionTx:", createPositionTx);
+  const priorityFee = 1000000; // Set your desired priority fee in lamports
+  createPositionTx
+  const txHash = await sendTransactionWithPriorityFee(connection, createPositionTx, [keypair, newPosition], priorityFee);
   console.log("Transaction hash:", txHash);
 
   return {
@@ -238,9 +302,10 @@ async function createPool() {
 }
 
 async function swap(dlmmPool: DLMM) {
-  const swapAmount = new BN(100);
+  const tokenXDecimals = 6;
+  const swapAmount = new BN(500000 * 10 ** tokenXDecimals);
   // Swap quote
-  const swapYtoX = true;
+  const swapYtoX = false;
   const binArrays = await dlmmPool.getBinArrayForSwap(swapYtoX);
 
   const swapQuote = await dlmmPool.swapQuote(swapAmount, swapYtoX, new BN(10), binArrays);
@@ -249,13 +314,13 @@ async function swap(dlmmPool: DLMM) {
 
   // Swap
   const swapTx = await dlmmPool.swap({
-    inToken: dlmmPool.tokenX.publicKey,
+    inToken: dlmmPool.tokenY.publicKey,
     binArraysPubkey: swapQuote.binArraysPubkey,
     inAmount: swapAmount,
     lbPair: dlmmPool.pubkey,
     user: user.publicKey,
     minOutAmount: swapQuote.minOutAmount,
-    outToken: dlmmPool.tokenY.publicKey,
+    outToken: dlmmPool.tokenX.publicKey,
   });
 
   try {
@@ -274,10 +339,10 @@ async function main() {
   console.log("Token X:", tokenX.toString());
   console.log("Token Y:", tokenY.toString());
 
-  const dlmmPool = await DLMM.create(connection, poolAddress, {
-    cluster: "devnet",
-  });
-  await swap(dlmmPool);
+  // const dlmmPool = await DLMM.create(connection, poolAddress, {
+  //   cluster: "mainnet-beta",
+  // });
+  // await swap(dlmmPool);
 }
 
 main();
