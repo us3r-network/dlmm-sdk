@@ -280,7 +280,7 @@ async function createPool() {
     },
   });
   const blockhashResponse = await connection.getLatestBlockhash();
-  const lastValidBlockHeight = blockhashResponse.lastValidBlockHeight - 150;
+  const lastValidBlockHeight = blockhashResponse.lastValidBlockHeight + 100;
 
   createPositionTx = new Transaction({
     feePayer: keypair.publicKey,
